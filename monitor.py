@@ -36,10 +36,11 @@ def read_sensor(cloud, dev):
     h = next((st[k] for k in ("va_humidity", "humidity_value", "humidity") if k in st), None)
     if t is None:
         return None
-    if abs(t) > 60:
+    while abs(t) > 60:   # Tuya podaje liczby bez przecinka (np. 2203 = 22,03°C)
         t /= 10
-    if h is not None and h > 100:
-        h /= 10
+    if h is not None:
+        while h > 100:
+            h /= 10
     return t, h
 
 
@@ -124,6 +125,9 @@ def load(f, default):
 def save_dashboard(now, ti, hi, to, ho, air, items, new_alert):
     r = lambda v: None if v is None else round(v)
     hist = load("history.json", [])
+    # usuń błędne odczyty z wcześniejszych uruchomień
+    hist = [p for p in hist if abs(p["ti"]) <= 60 and abs(p["to"]) <= 60
+            and (p["hi"] is None or p["hi"] <= 100) and (p["ho"] is None or p["ho"] <= 100)]
     hist.append({"t": now.isoformat(timespec="minutes"), "ti": round(ti, 1), "hi": r(hi),
                  "to": round(to, 1), "ho": r(ho), "pm25": air["pm2_5"], "pm10": air["pm10"]})
     hist = hist[-1344:]  # ok. 28 dni
@@ -221,7 +225,3 @@ if __name__ == "__main__":
         main()
     finally:
         publish()
-
-
-if __name__ == "__main__":
-    main()

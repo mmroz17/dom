@@ -1,4 +1,4 @@
-import os, json, datetime as dt, urllib.request
+import os, json, time, subprocess, datetime as dt, urllib.request
 from zoneinfo import ZoneInfo
 import tinytuya
 
@@ -188,6 +188,39 @@ def main():
     state["key"] = key
     json.dump(state, open(STATE_FILE, "w"))
     print(f"dom {ti:.1f}°C/{hi}%  balkon {to:.1f}°C  PM2.5 {air['pm2_5']}  porady: {key or '-'}")
+
+
+def sh(*a):
+    return subprocess.run(a, capture_output=True, text=True)
+
+
+def publish():
+    """Zapisuje wyniki w repozytorium (z ponawianiem, gdy ktoś równocześnie coś zmienił)."""
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    sh("git", "config", "user.name", "bot")
+    sh("git", "config", "user.email", "bot@users.noreply.github.com")
+    sh("git", "add", "state.json", "data.json", "history.json")
+    if sh("git", "diff", "--cached", "--quiet").returncode == 0:
+        return
+    sh("git", "commit", "-m", "state")
+    for _ in range(4):
+        r = sh("git", "pull", "--rebase", "-X", "theirs")
+        if r.returncode != 0:
+            sh("git", "rebase", "--abort")
+        r = sh("git", "push")
+        print(r.stdout, r.stderr)
+        if r.returncode == 0:
+            return
+        time.sleep(3)
+    raise SystemExit("Nie udało się zapisać wyników w repozytorium")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    finally:
+        publish()
 
 
 if __name__ == "__main__":

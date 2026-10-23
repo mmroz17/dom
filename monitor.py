@@ -5,7 +5,18 @@ import tinytuya
 LAT, LON = 50.073, 20.034          # Kraków, Osiedle Oświecenia
 TZ = ZoneInfo("Europe/Warsaw")
 NTFY = os.environ["NTFY_TOPIC"].strip()
-INDOOR = [x.strip() for x in os.environ["TUYA_INDOOR_IDS"].split(",") if x.strip()]
+def parse_rooms(raw):
+    items = [x.strip() for x in raw.split(",") if x.strip()]
+    rooms = []
+    for i, x in enumerate(items):
+        name, sep, dev = x.partition("=")
+        if not sep:
+            name, dev = ("Mieszkanie" if len(items) == 1 else f"Pokój {i + 1}"), x
+        rooms.append((name.strip(), dev.strip()))
+    return rooms
+
+
+ROOMS = parse_rooms(os.environ["TUYA_INDOOR_IDS"])
 OUTDOOR = os.environ["TUYA_OUTDOOR_ID"].strip()
 STATE_FILE = "state.json"
 
@@ -44,57 +55,99 @@ def read_sensor(cloud, dev):
     return t, h
 
 
-def target(hour):
-    if 6 <= hour < 9: return 21.0    # rano cieplej
-    if 9 <= hour < 18: return 20.5   # dzień (oszczędnie)
-    if 18 <= hour < 22: return 20.0  # wieczór chłodniej
-    return 18.0                      # noc / sen
+def target(name, hour):
+    n = name.lower()
+    if "łazien" in n or "lazien" in n:
+        return 23.5 if 6 <= hour < 9 else 23.0 if 18 <= hour < 22 else 21.5
+    if "sypial" in n:
+        return 21.5 if 6 <= hour < 9 else 20.5 if 9 <= hour < 21 else 19.0
+    if 6 <= hour < 9: return 22.0
+    if 9 <= hour < 18: return 21.5
+    if 18 <= hour < 22: return 21.0
+    return 19.5
 
 
-def advise(now, ti, hi, to, ho, pm25, pm10):
-    tgt, h, out = target(now.hour), now.hour, []
+def vent_min(to):
+    return 5 if to < 0 else 7 if to < 10 else 10
+
+
+def air_label(p):
+    return "bardzo dobre" if p <= 15 else "dobre" if p <= 35 else "umiarkowane" if p <= 55 else "złe"
+
+
+def conditions(rooms, to, ho, pm25, pm10):
+    lines = ["Warunki:"]
+    for r in rooms:
+        hum = f", {r['h']:.0f}%" if r["h"] is not None else ""
+        lines.append(f"• {r['name']}: {r['t']:.1f}°C{hum} (cel {r['target']:.1f}°C)")
+    hum = f", {ho:.0f}%" if ho is not None else ""
+    lines.append(f"• Balkon: {to:.1f}°C{hum}")
+    lines.append(f"• Powietrze: PM2.5 {pm25:.0f}, PM10 {pm10:.0f} ({air_label(pm25)})")
+    return "\n".join(lines)
+
+
+def advise(now, rooms, to, ho, pm25, pm10):
+    h, out = now.hour, []
     bad_air = pm25 > 35 or pm10 > 50
-    cold_out = to < 5
-    mins = 5 if to < 0 else 10
+    m = vent_min(to)
+    for r in rooms:
+        r["target"] = target(r["name"], h)
 
     if bad_air:
-        out.append(("smog", "Smog: okna zamknięte",
-                    f"PM2.5: {pm25:.0f}, PM10: {pm10:.0f} µg/m³. Nie wietrz, włącz oczyszczacz (tryb auto/wysoki).", 4))
+        out.append(("smog", "Smog: nie wietrz",
+                    f"PM2.5 {pm25:.0f}, PM10 {pm10:.0f} µg/m³. Zamknij okna we wszystkich pokojach "
+                    "i włącz oczyszczacz (tryb auto lub wysoki).", 4))
 
-    if ti > tgt + 1:
-        if to < ti - 2 and not bad_air:
-            out.append(("otworz", "Otwórz okna",
-                        f"W domu {ti:.1f}°C (cel {tgt:.0f}°C), na balkonie {to:.1f}°C. Wywietrz {mins} min.", 3))
+    hot = [r for r in rooms if r["t"] > r["target"] + 1.5]
+    cold = [r for r in rooms if r["t"] < r["target"] - 0.7]
+
+    if hot:
+        coolest = min(r["t"] for r in hot)
+        if to < coolest - 3 and not bad_air:
+            lines = [f"• {r['name']}: {r['t']:.1f}°C (cel {r['target']:.1f}). Otwórz okno szeroko na {m} min, potem zamknij."
+                     for r in hot]
+            out.append(("otworz:" + ",".join(r["name"] for r in hot), "Za ciepło: otwórz okna", "\n".join(lines), 3))
         else:
-            out.append(("przykrec", "Przykręć kaloryfery",
-                        f"W domu {ti:.1f}°C, cel {tgt:.0f}°C. Przykręć zawory o 1 stopień.", 3))
-    elif ti < tgt - 1:
-        if to > ti + 1 and not bad_air:
-            out.append(("otworz", "Otwórz okna",
-                        f"W domu {ti:.1f}°C, a na balkonie ciepleje: {to:.1f}°C. Wywietrz {mins} min.", 3))
+            lines = [f"• {r['name']}: {r['t']:.1f}°C (cel {r['target']:.1f}). Przykręć zawór kaloryfera o 1 stopień (np. z 3 na 2)."
+                     for r in hot]
+            out.append(("przykrec:" + ",".join(r["name"] for r in hot), "Za ciepło: przykręć kaloryfery", "\n".join(lines), 3))
+
+    if cold:
+        if to > max(r["t"] for r in cold) + 1 and not bad_air:
+            lines = [f"• {r['name']}: {r['t']:.1f}°C (cel {r['target']:.1f}). Na balkonie jest cieplej ({to:.1f}°C): wywietrz {m} min."
+                     for r in cold]
+            out.append(("ciepl:" + ",".join(r["name"] for r in cold), "Chłodno: wywietrz ciepłym powietrzem", "\n".join(lines), 3))
         else:
-            out.append(("odkrec", "Odkręć kaloryfery",
-                        f"W domu {ti:.1f}°C, cel {tgt:.0f}°C. Odkręć zawory o 1 stopień i sprawdź, czy okna są zamknięte.", 3))
+            lines = [f"• {r['name']}: {r['t']:.1f}°C (cel {r['target']:.1f}). Odkręć zawór kaloryfera o 1 stopień (np. z 2 na 3) i sprawdź, czy okno jest zamknięte."
+                     for r in cold]
+            out.append(("odkrec:" + ",".join(r["name"] for r in cold), "Chłodno: odkręć kaloryfery", "\n".join(lines), 3))
 
-    if hi is not None:
-        if hi > 60:
-            if ho is not None and ho < hi - 10 and not bad_air:
-                out.append(("wilg_wys", "Wilgotność za wysoka",
-                            f"W domu {hi:.0f}%. Wywietrz {mins} min (łazienka, kuchnia).", 3))
-            else:
-                out.append(("wilg_wys", "Wilgotność za wysoka",
-                            f"W domu {hi:.0f}%. Włącz wentylację w łazience, nie susz prania w domu.", 3))
-        elif hi < 35:
-            out.append(("wilg_nis", "Powietrze za suche",
-                        f"W domu {hi:.0f}%. Nie wietrz długo, rozwieś pranie lub postaw miskę z wodą.", 2))
+    wet, dry = [], []
+    for r in rooms:
+        if r["h"] is None:
+            continue
+        lim = 75 if ("łazien" in r["name"].lower() or "lazien" in r["name"].lower()) else 60
+        if r["h"] > lim: wet.append(r)
+        elif r["h"] < 35: dry.append(r)
+    if wet:
+        can_vent = ho is not None and not bad_air and all(ho < r["h"] - 10 for r in wet)
+        lines = [f"• {r['name']}: wilgotność {r['h']:.0f}%. " +
+                 (f"Wywietrz {m} min." if can_vent else "Włącz wentylację/oczyszczacz, zamknij drzwi do reszty mieszkania, nie susz tu prania.")
+                 for r in wet]
+        out.append(("wilg:" + ",".join(r["name"] for r in wet), "Za wilgotno", "\n".join(lines), 3))
+    if dry:
+        lines = [f"• {r['name']}: wilgotność {r['h']:.0f}%. Nie wietrz długo, rozwieś pranie lub postaw miskę z wodą." for r in dry]
+        out.append(("sucho:" + ",".join(r["name"] for r in dry), "Za sucho", "\n".join(lines), 2))
 
-    if h == 21 and ti > 19.5:
-        out.append(("sen", "Przygotuj sypialnię",
-                    f"Do spania lepiej ~18°C. Przykręć grzejnik w sypialni (teraz w domu {ti:.1f}°C).", 2))
+    for r in rooms:
+        if "sypial" in r["name"].lower() and 21 <= h < 23 and r["t"] > 20.5:
+            out.append(("sen", "Sypialnia przed snem",
+                        f"• {r['name']}: {r['t']:.1f}°C, do spania ok. 19°C. Przykręć zawór o 1 stopień"
+                        + ("" if bad_air else f" i wywietrz {m} min przed snem.") , 2))
 
     if not out and 7 <= h < 9 and not bad_air and to > -15:
         out.append(("poranek", "Poranne wietrzenie",
-                    f"Powietrze OK (PM2.5: {pm25:.0f}). Wywietrz mieszkanie {mins} min, a potem zamknij okna.", 2))
+                    f"Powietrze dobre. Otwórz okna szeroko w całym mieszkaniu na {m} min (krótko, żeby nie wychłodzić ścian), potem zamknij.", 2))
     return out
 
 
@@ -122,21 +175,26 @@ def load(f, default):
         return default
 
 
-def save_dashboard(now, ti, hi, to, ho, air, items, new_alert):
-    r = lambda v: None if v is None else round(v)
+def save_dashboard(now, rooms, to, ho, air, items, new_alert):
+    r0 = lambda v: None if v is None else round(v)
     hist = load("history.json", [])
-    # usuń błędne odczyty z wcześniejszych uruchomień
     hist = [p for p in hist if abs(p["ti"]) <= 60 and abs(p["to"]) <= 60
             and (p["hi"] is None or p["hi"] <= 100) and (p["ho"] is None or p["ho"] <= 100)]
-    hist.append({"t": now.isoformat(timespec="minutes"), "ti": round(ti, 1), "hi": r(hi),
-                 "to": round(to, 1), "ho": r(ho), "pm25": air["pm2_5"], "pm10": air["pm10"]})
+    hs = [r["h"] for r in rooms if r["h"] is not None]
+    ti = sum(r["t"] for r in rooms) / len(rooms)
+    hist.append({"t": now.isoformat(timespec="minutes"), "ti": round(ti, 1),
+                 "hi": r0(sum(hs) / len(hs)) if hs else None,
+                 "to": round(to, 1), "ho": r0(ho), "pm25": air["pm2_5"], "pm10": air["pm10"],
+                 "rm": {r["name"]: [round(r["t"], 1), r0(r["h"])] for r in rooms}})
     hist = hist[-1344:]  # ok. 28 dni
-    json.dump(hist, open("history.json", "w"), separators=(",", ":"))
+    json.dump(hist, open("history.json", "w"), separators=(",", ":"), ensure_ascii=False)
     alerts = load("data.json", {}).get("alerts", [])
     if new_alert:
         alerts = (alerts + [new_alert])[-40:]
     json.dump({"updated": now.isoformat(timespec="minutes"), "lat": LAT, "lon": LON,
-               "target": target(now.hour), "now": hist[-1], "alerts": alerts,
+               "target": round(sum(r["target"] for r in rooms) / len(rooms), 1),
+               "now": hist[-1], "alerts": alerts,
+               "rooms": [{"name": r["name"], "t": round(r["t"], 1), "h": r0(r["h"]), "target": r["target"]} for r in rooms],
                "advice": [{"title": t, "msg": m} for _, t, m, _ in items]},
               open("data.json", "w"), ensure_ascii=False)
 
@@ -157,11 +215,15 @@ def main():
             print("briefing error", e)
 
     cloud = tinytuya.Cloud(apiRegion="eu", apiKey=os.environ["TUYA_KEY"].strip(),
-                           apiSecret=os.environ["TUYA_SECRET"].strip(), apiDeviceID=INDOOR[0])
-    ins = [r for r in (read_sensor(cloud, d) for d in INDOOR) if r]
+                           apiSecret=os.environ["TUYA_SECRET"].strip(), apiDeviceID=ROOMS[0][1])
+    rooms = []
+    for name, dev in ROOMS:
+        rd = read_sensor(cloud, dev)
+        if rd:
+            rooms.append({"name": name, "t": rd[0], "h": rd[1]})
     outs = read_sensor(cloud, OUTDOOR)
 
-    if not ins or not outs:
+    if not rooms or not outs:
         if state.get("key") != "offline":
             notify("Czujniki nie odpowiadają",
                    "Sprawdź baterie lub połączenie. Możliwe, że wygasł dostęp próbny w Tuya IoT Platform (do przedłużenia za darmo).", 4)
@@ -169,14 +231,11 @@ def main():
         json.dump(state, open(STATE_FILE, "w"))
         return
 
-    ti = sum(r[0] for r in ins) / len(ins)
-    hs = [r[1] for r in ins if r[1] is not None]
-    hi = sum(hs) / len(hs) if hs else None
     to, ho = outs
 
     air = get("https://air-quality-api.open-meteo.com/v1/air-quality?latitude=%s&longitude=%s"
               "&current=pm2_5,pm10" % (LAT, LON))["current"]
-    items = advise(now, ti, hi, to, ho, air["pm2_5"], air["pm10"])
+    items = advise(now, rooms, to, ho, air["pm2_5"], air["pm10"])
     key = "|".join(k for k, *_ in items)
     last = dt.datetime.fromisoformat(state["sent"]) if state.get("sent") else None
     stale = last is None or (now - last).total_seconds() > 4 * 3600
@@ -184,14 +243,14 @@ def main():
     new_alert = None
     if items and (key != state.get("key") or stale):
         title = items[0][1]
-        msg = "\n\n".join(m for _, _, m, _ in items)
+        msg = "\n\n".join(m for _, _, m, _ in items) + "\n\n" + conditions(rooms, to, ho, air["pm2_5"], air["pm10"])
         notify(title, msg, max(p for *_, p in items))
         state["sent"] = now.isoformat()
         new_alert = {"t": now.isoformat(timespec="minutes"), "title": title, "msg": msg}
-    save_dashboard(now, ti, hi, to, ho, air, items, new_alert)
+    save_dashboard(now, rooms, to, ho, air, items, new_alert)
     state["key"] = key
     json.dump(state, open(STATE_FILE, "w"))
-    print(f"dom {ti:.1f}°C/{hi}%  balkon {to:.1f}°C  PM2.5 {air['pm2_5']}  porady: {key or '-'}")
+    print("pokoje:", [(r["name"], r["t"], r["h"]) for r in rooms], "balkon:", to, ho, "PM2.5:", air["pm2_5"], "porady:", key or "-")
 
 
 def sh(*a):

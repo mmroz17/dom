@@ -4,7 +4,7 @@ import tinytuya
 
 LAT, LON = 50.073, 20.034          # Kraków, Osiedle Oświecenia
 TZ = ZoneInfo("Europe/Warsaw")
-NTFY = os.environ["NTFY_TOPIC"]
+NTFY = os.environ["NTFY_TOPIC"].strip()
 INDOOR = [x.strip() for x in os.environ["TUYA_INDOOR_IDS"].split(",") if x.strip()]
 OUTDOOR = os.environ["TUYA_OUTDOOR_ID"].strip()
 STATE_FILE = "state.json"
@@ -152,8 +152,8 @@ def main():
         except Exception as e:
             print("briefing error", e)
 
-    cloud = tinytuya.Cloud(apiRegion="eu", apiKey=os.environ["TUYA_KEY"],
-                           apiSecret=os.environ["TUYA_SECRET"], apiDeviceID=INDOOR[0])
+    cloud = tinytuya.Cloud(apiRegion="eu", apiKey=os.environ["TUYA_KEY"].strip(),
+                           apiSecret=os.environ["TUYA_SECRET"].strip(), apiDeviceID=INDOOR[0])
     ins = [r for r in (read_sensor(cloud, d) for d in INDOOR) if r]
     outs = read_sensor(cloud, OUTDOOR)
 

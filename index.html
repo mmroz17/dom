@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Klimat w domu</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--tx:#1b1f24;--mu:#667085;--bd:#e3e6ea}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1216;--card:#181c22;--tx:#eceff3;--mu:#98a2b3;--bd:#2a3039}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.4 system-ui,sans-serif;padding:12px;max-width:760px;margin:auto}
+h1{font-size:20px;margin:4px 0}h2{font-size:15px;margin:0 0 8px}
+.mu{color:var(--mu);font-size:13px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:12px;margin:10px 0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.grid .card{margin:0}
+.big{font-size:30px;font-weight:600}
+.tabs{display:flex;gap:6px;margin:10px 0}
+.tabs button{flex:1;padding:7px;border:1px solid var(--bd);background:var(--card);color:var(--tx);border-radius:10px;font:inherit}
+.tabs button.on{background:var(--tx);color:var(--bg)}
+svg{width:100%;height:auto;display:block}
+.lg{display:flex;gap:14px;font-size:13px;color:var(--mu);margin-top:4px}
+.lg i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px}
+.fc{display:flex;gap:8px;overflow-x:auto}
+.fc div{min-width:78px;text-align:center;padding:8px 4px;border:1px solid var(--bd);border-radius:10px}
+.fc b{display:block;font-size:22px}
+.al{padding:8px 0;border-top:1px solid var(--bd)}
+.al:first-child{border-top:0}
+#err{color:#e03131}
+</style>
+</head>
+<body>
+<h1>Klimat w domu</h1>
+<div class="mu" id="upd">Ładowanie…</div>
+<p id="err" hidden>Nie udało się wczytać danych. Sprawdź, czy skrypt już raz się uruchomił.</p>
+
+<div class="card" id="adv"></div>
+
+<div class="grid">
+  <div class="card"><div class="mu">W domu</div><div class="big" id="ti">–</div><div class="mu" id="hi"></div></div>
+  <div class="card"><div class="mu">Balkon</div><div class="big" id="to">–</div><div class="mu" id="ho"></div></div>
+  <div class="card"><div class="mu">Powietrze (PM2.5)</div><div class="big" id="pm">–</div><div class="mu" id="pml"></div></div>
+  <div class="card"><div class="mu">Pogoda teraz</div><div class="big" id="wn">–</div><div class="mu" id="wd"></div></div>
+</div>
+
+<div class="card"><h2>Pomieszczenia</h2><div id="rooms"></div></div>
+
+<div class="card"><h2>Prognoza</h2><div class="fc" id="fc"><span class="mu">Ładowanie…</span></div></div>
+
+<div class="tabs" id="tabs">
+  <button data-r="1" class="on">24 h</button><button data-r="3">3 dni</button>
+  <button data-r="7">7 dni</button><button data-r="28">28 dni</button>
+</div>
+<div class="card"><h2>Temperatura (°C)</h2><div id="c1"></div></div>
+<div class="card"><h2>Wilgotność (%)</h2><div id="c2"></div></div>
+<div class="card"><h2>Smog PM2.5 (µg/m³)</h2><div id="c3"></div></div>
+<div class="card"><h2>Historia powiadomień</h2><div id="al"></div></div>
+
+<script>
+const $=s=>document.querySelector(s);
+let H=[],D={},range=1;
+const num=(v,u)=>v==null?'–':v+u;
+const pmL=p=>p<=15?['bardzo dobre','#2f9e44']:p<=35?['dobre','#74b816']:p<=55?['umiarkowane','#f08c00']:['złe – nie wietrz','#e03131'];
+const ico=c=>c==0?'☀️':c<=2?'🌤️':c==3?'☁️':c<=48?'🌫️':c<=57?'🌦️':c<=67?'🌧️':c<=77?'❄️':c<=82?'🌧️':'⛈️';
+const fmtT=d=>d.toLocaleString('pl',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+
+async function init(){
+  try{
+    const q='?'+Date.now();
+    [D,H]=await Promise.all([fetch('data.json'+q).then(r=>r.json()),fetch('history.json'+q).then(r=>r.json())]);
+  }catch(e){$('#err').hidden=false;$('#upd').textContent='';return}
+  render();forecast();
+}
+
+function render(){
+  const n=D.now,age=(Date.now()-new Date(D.updated))/6e4;
+  $('#upd').innerHTML='Aktualizacja: '+fmtT(new Date(D.updated))+(age>90?' <b style="color:#e03131">· dane nieaktualne</b>':'');
+  $('#ti').textContent=num(n.ti,'°C');$('#hi').textContent='wilgotność '+num(n.hi,'%')+' · cel '+D.target+'°C';
+  $('#to').textContent=num(n.to,'°C');$('#ho').textContent='wilgotność '+num(n.ho,'%');
+  const [l,c]=pmL(n.pm25);
+  $('#pm').textContent=n.pm25;$('#pm').style.color=c;$('#pml').textContent=l+' · PM10: '+n.pm10;
+  $('#adv').innerHTML='<h2>Co zrobić teraz</h2>'+(D.advice.length
+    ?D.advice.map(a=>`<p><b>${a.title}</b><br>${a.msg}</p>`).join('')
+    :'<p>✅ Klimat w normie, nic nie musisz robić.</p>');
+  $('#rooms').innerHTML=(D.rooms||[]).map(r=>{const d=r.t-r.target,c=d>1.5?'#e8590c':d<-0.7?'#1c7ed6':'#2f9e44';
+    return `<div class="al"><b>${r.name}</b> <span style="color:${c};font-weight:600">${r.t}°C</span> <span class="mu">cel ${r.target}° · wilgotność ${num(r.h,'%')}</span></div>`}).join('')||'<span class="mu">Brak danych</span>';
+  charts();
+  $('#al').innerHTML=D.alerts.length?[...D.alerts].reverse().map(a=>
+    `<div class="al"><div class="mu">${fmtT(new Date(a.t))}</div><b>${a.title}</b><br>${a.msg.replace(/\n/g,'<br>')}</div>`).join('')
+    :'<span class="mu">Jeszcze nic nie wysłano.</span>';
+}
+
+function chart(id,defs,thr){
+  const now=Date.now(),from=now-range*864e5,pts=H.filter(p=>new Date(p.t)>=from);
+  const W=600,HH=170,L=34,R=8,T=8,B=20,all=[];
+  defs.forEach(d=>pts.forEach(p=>p[d.k]!=null&&all.push(p[d.k])));
+  if(!all.length){$(id).innerHTML='<span class="mu">Brak danych w tym okresie</span>';return}
+  if(thr!=null)all.push(thr);
+  const mn=Math.floor(Math.min(...all)-1),mx=Math.ceil(Math.max(...all)+1);
+  const x=t=>(L+(t-from)/(now-from)*(W-L-R)).toFixed(1),y=v=>(T+(1-(v-mn)/(mx-mn))*(HH-T-B)).toFixed(1);
+  let s=`<svg viewBox="0 0 ${W} ${HH}">`;
+  for(let i=0;i<=4;i++){const v=mn+(mx-mn)*i/4;
+    s+=`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--bd)"/><text x="${L-4}" y="${+y(v)+4}" text-anchor="end" fill="var(--mu)" font-size="11">${Math.round(v)}</text>`}
+  for(let i=0;i<=3;i++){const t=from+(now-from)*i/3,d=new Date(t);
+    s+=`<text x="${x(t)}" y="${HH-5}" text-anchor="${i==0?'start':i==3?'end':'middle'}" fill="var(--mu)" font-size="11">${range<=1?d.toLocaleTimeString('pl',{hour:'2-digit',minute:'2-digit'}):d.toLocaleDateString('pl',{day:'numeric',month:'short'})}</text>`}
+  if(thr!=null)s+=`<line x1="${L}" x2="${W-R}" y1="${y(thr)}" y2="${y(thr)}" stroke="#e03131" stroke-dasharray="5 4"/>`;
+  defs.forEach(d=>{let p='',pen=false;
+    pts.forEach(q=>{if(q[d.k]==null){pen=false;return}p+=(pen?'L':'M')+x(new Date(q.t))+' '+y(q[d.k])+' ';pen=true});
+    s+=`<path d="${p}" fill="none" stroke="${d.c}" stroke-width="2" stroke-linejoin="round"/>`});
+  $(id).innerHTML=s+'</svg><div class="lg">'+defs.map(d=>`<span><i style="background:${d.c}"></i>${d.n}</span>`).join('')+'</div>';
+}
+function charts(){
+  chart('#c1',[{k:'ti',n:'dom',c:'#e8590c'},{k:'to',n:'balkon',c:'#1c7ed6'}]);
+  chart('#c2',[{k:'hi',n:'dom',c:'#0ca678'},{k:'ho',n:'balkon',c:'#7048e8'}]);
+  chart('#c3',[{k:'pm25',n:'PM2.5',c:'#d6336c'}],35);
+}
+$('#tabs').onclick=e=>{const b=e.target.closest('button');if(!b)return;
+  range=+b.dataset.r;document.querySelectorAll('#tabs button').forEach(x=>x.classList.toggle('on',x==b));charts()};
+
+async function forecast(){
+  try{
+    const w=await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${D.lat}&longitude=${D.lon}`+
+      `&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m`+
+      `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=Europe%2FWarsaw&forecast_days=7`).then(r=>r.json());
+    const c=w.current;
+    $('#wn').textContent=ico(c.weather_code)+' '+Math.round(c.temperature_2m)+'°C';
+    $('#wd').textContent='odczuwalna '+Math.round(c.apparent_temperature)+'° · wiatr '+Math.round(c.wind_speed_10m)+' km/h';
+    const d=w.daily;
+    $('#fc').innerHTML=d.time.map((t,i)=>`<div><span class="mu">${i==0?'dziś':new Date(t).toLocaleDateString('pl',{weekday:'short'})}</span><b>${ico(d.weather_code[i])}</b>${Math.round(d.temperature_2m_max[i])}° <span class="mu">${Math.round(d.temperature_2m_min[i])}°</span><div class="mu" style="border:0;padding:2px 0 0">${d.precipitation_sum[i]>=0.5?'💧'+d.precipitation_sum[i].toFixed(1)+' mm':'&nbsp;'}</div></div>`).join('');
+  }catch(e){$('#fc').innerHTML='<span class="mu">Brak prognozy</span>'}
+}
+init();
+</script>
+</body>
+</html>
